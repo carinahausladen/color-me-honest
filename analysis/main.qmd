@@ -1,0 +1,1371 @@
+---
+title: "Color me honest!"
+author:
+  - name: Carina I. Hausladen
+    orcid: 0000-0003-4397-2339
+    email: carinah@caltech.edu
+    affiliations:
+      - name: California Institute of Technology
+        address: California Blv
+        city: Pasadena
+        state: CA
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    html-math-method: katex
+---
+
+# Setup 
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+rm(list=ls())
+
+library(readr)
+library(reshape2)
+library(mousetrap)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(broom)
+library(ggdist)
+library(purrr)
+library(gt)
+library(grid)
+library(gridExtra)
+
+
+read.csv("/Users/carinah/Documents/GitHub/color-me-honest/data/nov_2018.csv") %>%
+  mutate(across(c(player.checkmore), ~1-.)) ->raw_nov
+read.csv("/Users/carinah/Documents/GitHub/color-me-honest/data/jun_2019.csv") %>%
+  filter(session.is_demo == 0, session.code != 'ty94co6a') %>%  #dropping demo and early test sessions
+  mutate(across(c(player.checkmore, player.cblind), ~1-.)) ->raw_jun # both values need to be flipped
+names<-intersect(colnames(raw_jun), colnames(raw_nov))
+
+rbind(raw_nov[,colnames(raw_nov) %in% names],
+             raw_jun[,colnames(raw_jun) %in% names]) %>%
+  filter(player.cblind == 0 | is.na(player.cblind),  #color-blind (3)
+         player.report != "R")->df #exclude failed to report in time (3)	
+
+df$treatment<- ifelse(df$player.treat_color==1 & df$player.treat_pressure==1, "C*", 
+                      ifelse(df$player.treat_color==1 & df$player.treat_pressure==0, "C", 
+                             ifelse(df$player.treat_color==0 & df$player.treat_pressure==1, "R*",
+                                    ifelse(df$player.treat_color==0 & df$player.treat_pressure==0, "R", "NA"))))
+
+
+rbind(read.csv("/Users/carinah/Documents/GitHub/color-me-honest/data/TimeSpent_jun_2019.csv"),  
+      read.csv("/Users/carinah/Documents/GitHub/color-me-honest/data/TimeSpent_nov_2018.csv"))  %>%
+  filter(page_name=="Decision") %>%
+  select(participant__code, seconds_on_page) %>%
+  na.omit()->df_time
+
+df_time <- df_time[df_time$participant__code %in% df$participant.code, ]
+colnames(df_time)<-c("participant.code","seconds_on_page")
+
+
+df %>% left_join(df_time, by=c("participant.code")) ->df
+
+source("utils.R")
+rm(df_time)
+```
+
+```{r mt df, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+df_lng <- data.frame()
+for (i in 1:length(df$participant.code)) {
+  df_temp <- data.frame(participant.code=df$participant.code[i],
+                        treatment=df$treatment[i],
+                        report=df$player.report_value[i],
+                        sec_op=df$seconds_on_page[i],
+                        x = as.numeric(unlist(strsplit(as.character(df$player.mouse_x[i]),split = ","))), 
+                        y = as.numeric(unlist(strsplit(as.character(df$player.mouse_y[i]),split = ","))),
+                        t = as.numeric(unlist(strsplit(as.character(df$player.mouse_t[i]),split = ","))) 
+                        )
+  df_lng <- rbind(df_lng, df_temp)
+}
+
+#df_lng %>% write.csv("df_lng.csv")
+rm(df_temp)
+```
+
+```{r calc total dist, echo=FALSE, cache=TRUE}
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(x_diff = lead(x) - x, 
+         y_diff = lead(y) - y) %>%
+  slice(-n()) %>%
+  mutate(distance = map2_dbl(x_diff, y_diff, ~ sqrt(.x^2 + .y^2))) %>%
+  summarise(total_distance = sum(distance)) %>%
+  ungroup() %>%
+  mutate(total_distance = as.numeric(total_distance))->total_dist
+#total_dist %>% write_csv("totaldist.csv")
+# the author then codes based on the plotted trajectories 1) A/O types 2) nr. options visited
+```
+
+# Overview
+```{r overview, cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE}
+females<-round(table(df$player.sex)[1]/sum(table(df$player.sex))*100, digits=0)
+mjor<-round(table(df$player.mjr)[1]+table(df$player.mjr)[2]/sum(table(df$player.mjr))*100, digits=0)
+age<-round(mean(df$player.age), digits=1)
+sd<-round(sd(df$player.age), digits=1)
+```
+
+In a preregistered\footnote{\url{https://doi.org/10.1257/rct.3115-2.1}} laboratory experiment, we collected a total of `r dim(df)[1]` observations (between 55 and 58 in each condition, excluding color-blind participants and those who failed to report in time in the time pressure conditions). 
+The data sample contains `r females` \% females,`r mjor` \%  business administration and economics students. The average age is `r age` years (SD = `r sd`). 
+
+A manipulation check confirms that \RP{} and \CP{} participants reported significantly higher levels of perceived pressure than their counterparts in conditions \R{} and \C{} (@tbl-A1).
+
+
+# Time pressure effect depends on the die
+
+::: columns
+::: column
+```{r Fig 2A ttests, cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE}
+df %>%
+  select(treatment, player.report_value) %>%
+  do(pairwise_tests = tidy(pairwise.t.test(.$player.report_value, .$treatment, p.adj = "none"))) %>%
+  unnest(pairwise_tests) %>%
+  mutate(p.value = map_pvalue(p.value)) %>%
+  filter(!p.value == "ns") -> ttest_all
+
+ttest1<-t.test(player.report_value~treatment, 
+               data=df%>% filter(treatment=="R*"|treatment=="R"), 
+               alternative="two.sided") 
+ttest2<-t.test(player.report_value~treatment, data=df%>% filter(treatment=="R"|treatment=="C"), alternative="two.sided")
+
+df %>%
+  select(treatment, player.report_value) %>%
+  group_by(treatment) %>%
+  do(t_test = tidy(t.test(.$player.report_value, mu = 3.5))) %>%
+  ungroup() %>%
+  unnest(t_test) %>%
+  select(treatment, estimate, statistic, p.value) %>%
+  mutate(signif = map_pvalue(p.value)) %>%
+  filter(!signif=="ns")->ttest3.5
+```
+
+We never observe an average die roll report below the `honesty reference' of 3.5 (@fig-2A).
+In particular, there is evidence of dishonest behavior in conditions $C$ (t= `r round(ttest3.5[1,3], digits=1)`, pval=`r round(ttest3.5[1,4], digits=3)`) and  $R*$ (t= `r round(ttest3.5[2,3], digits=1)`, pval=`r round(ttest3.5[2,4], digits=3)`).
+In line with our conjecture outlined in the introduction, we find the effect of time pressure to depend on the type of the die used. There is more dishonesty under time pressure with the regular die (t= `r round(ttest2$statistic, digits=1)`, pval=`r round(ttest2$p.value, digits=3)`) but no such effect can be found with the color die. 
+Also note that without any time pressure, the use of the color die results in higher reports (t= `r round(ttest1$statistic, digits=1)`, pval=`r round(ttest1$p.value, digits=3)`).
+These findings are corroborated by an ordered logit regression estimated using Bayesian inference.
+:::
+
+::: column
+```{r Fig 2A, echo=FALSE, cache=TRUE, message=FALSE, warning=FALSE}
+#| fig-cap: "Reported values by treatment group. The dashed horizontal lines show the full honesty benchmark. The dashed vertical line shows the mean reported value by treatment group."
+#| label: fig-2A
+df_counts <- df %>% 
+  group_by(treatment) %>% 
+  mutate(mean=mean(player.report_value)) %>%
+  group_by(treatment, player.report_value, mean) %>% 
+  summarize(count=n()) %>%
+  group_by(treatment) %>%
+  mutate(prob=count/sum(count))
+
+p1<-as.character(ttest_all[2,3])
+p2<-as.character(ttest_all[1,3])
+
+ggplot(df_counts, aes(y = player.report_value, 
+                      x = prob, 
+                      group = treatment)) +
+  geom_segment(aes(y = player.report_value, 
+                   yend = player.report_value, 
+                   x = 0, 
+                   xend = prob),
+               color = "grey", size = 0.8) +
+  facet_wrap(~treatment, ncol=2)+
+  theme_classic()+
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA),
+        text=element_text(size=9),
+        aspect.ratio = 1)+
+  scale_y_continuous(name="Reported Value", limits=c(1, 6), breaks = 1:6) +
+  xlab("Treatment")+
+  geom_hline(aes(yintercept = mean, color=treatment), size=.5) +
+  
+  geom_label(data = df_counts %>% select(treatment, mean) %>% unique(), 
+            aes(x = 0, y = mean,
+                fill=factor(treatment),
+                label= paste('mu', "==", round(mean, digits=2))),
+            parse = TRUE,
+            hjust = -.0001, 
+           color="white", fontface="bold",
+            size = 3, 
+            vjust = -.1) +
+
+  labs(y = "Treatment", x = "Probability", color = "Player Report Value")+
+  
+  scale_x_continuous(name="Probability", limits=c(0, 0.3), breaks = c(0, 1/6, 0.3), labels = c(0,0.16,0.30)) +
+  geom_hline(aes(yintercept = 3.5), size=.2, color="grey", linetype="dotted")+
+  
+  geom_vline(aes(xintercept = 1/6), size=.2, linetype="dotted", color="grey")+
+  ###   
+  geom_text(data = subset(df_counts, treatment == "C"),
+            aes(x = unique(df_counts$prob[df_counts$treatment=="C" & df_counts$player.report_value==4])+.03, 
+                y = unique(df_counts$mean[df_counts$treatment=="C"])-.1), label = ttest3.5$signif[ttest3.5$treatment=="C"], angle=90, color="grey", size=3, , vjust=.5, hjust=1.8)+
+  geom_segment(data = subset(df_counts, treatment == "C"),
+               aes(x = unique(df_counts$prob[df_counts$treatment=="C" & df_counts$player.report_value==4])+.03, 
+                   xend = unique(df_counts$prob[df_counts$treatment=="C" & df_counts$player.report_value==4])+.03,
+                   y = 3.5, 
+                   yend = unique(df_counts$mean[df_counts$treatment=="C"])), 
+               color = "grey", size = .5) +
+
+### 
+geom_text(data = subset(df_counts, treatment == "R*"),
+          aes(x = unique(df_counts$prob[df_counts$treatment=="R*" & df_counts$player.report_value==4])+.03, 
+              y = unique(df_counts$mean[df_counts$treatment=="R*"]-.11)), 
+          label = ttest3.5$signif[ttest3.5$treatment=="R*"], angle=90, color="grey", size=3, vjust=.5, hjust=1.8)+
+  
+  geom_segment(data = subset(df_counts, treatment == "R*"),
+               aes(x = unique(df_counts$prob[df_counts$treatment=="R*" & df_counts$player.report_value==4])+.03, 
+                   xend = unique(df_counts$prob[df_counts$treatment=="R*" & df_counts$player.report_value==4])+.03,
+                   y = 3.5, yend = unique(df_counts$mean[df_counts$treatment=="R*"])), 
+               color = "grey", size = .5) +
+
+  ### 
+  geom_text(data = subset(df_counts, treatment == "R"),
+            aes(x = .19,
+                y = unique(df_counts$mean[df_counts$treatment=="R*"])-.17), 
+            label = p1, angle=90, color="darkgrey", size=3, vjust=.5, hjust=1.8) +
+  
+  
+  geom_segment(data = subset(df_counts, treatment == "R"),
+               aes(
+                 x = .19,
+                 xend = .19,
+                 y = unique(df_counts$mean[df_counts$treatment=="R"]), 
+                 yend = unique(df_counts$mean[df_counts$treatment=="R*"])), 
+               color = "grey", size = .5) +
+
+
+  geom_segment(data = subset(df_counts, treatment == "R"),
+               aes(
+                 x = .19,
+                 xend = .24,
+                 y = unique(df_counts$mean[df_counts$treatment=="R*"]), 
+                 yend = unique(df_counts$mean[df_counts$treatment=="R*"])
+               ), 
+               color = "#785ef0", size = .5) +
+  ###
+  geom_text(data = subset(df_counts, treatment == "R"),
+            aes(
+              x = .25,
+              y = unique(df_counts$mean[df_counts$treatment=="R*"]-.17), 
+            ), 
+            label = p2, angle=90, color="darkgrey", size=3, vjust=.5, hjust=1.8)+
+  geom_segment(data = subset(df_counts, treatment == "R"),
+               aes(
+                 x = .25,
+                 xend = .25,
+                 y = unique(df_counts$mean[df_counts$treatment=="R"]), 
+                 yend = unique(df_counts$mean[df_counts$treatment=="C"])), 
+               color = "grey", size = .5)+
+  geom_segment(data = subset(df_counts, treatment == "R"),
+               aes(
+                 x = .25,
+                 xend = .3,
+                 y = unique(df_counts$mean[df_counts$treatment=="C"]), 
+                 yend = unique(df_counts$mean[df_counts$treatment=="C"])
+               ), 
+               color = "#dc267f", size = .5)  +
+  
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0"))+
+  scale_fill_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) ->plt_2A
+plt_2A
+#ggsave(plt_2A, filename = "plt1.pdf", width = 6.6*4/5,height = 3, dpi = 1200, units = "in", device='pdf')
+```
+:::
+:::
+
+# Color die evokes curiosity
+
+::: columns
+::: column
+```{r, count motivation by treatment, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE, message=FALSE}
+df %>%
+  left_join(read_csv("motivation-annotated.csv", col_types = cols_only(participant.code = col_character(), motivation = col_character())), 
+            by = "participant.code") %>%
+  select(participant.code, treatment, player.checkmore, motivation) %>%
+  filter(!is.na(motivation)) %>%
+  left_join(read_csv("totaldist-annotated.csv", col_types = cols()) %>% select(participant.code,type,options_visited), by = "participant.code") -> df_temp
+
+## count by selfreport
+df_temp %>%
+  filter(player.checkmore == 1) %>%
+  select(treatment, motivation) %>%
+  mutate(motivation = factor(motivation, levels = c("payoff", "curiosity", "other"))) %>%
+  count(treatment, motivation) %>%
+  pivot_wider(names_from = treatment, values_from = n) -> df_self
+
+df_self  %>%
+  mutate_all(funs(ifelse(is.na(.), 0, .))) %>%
+  mutate(total = rowSums(pick(where(is.numeric), -motivation)))-> df_self
+
+## count by trajectories
+df_temp %>%
+  filter(options_visited > 1) %>%
+  select(treatment, motivation) %>%
+  count(treatment, motivation) %>%
+  group_by(treatment) %>%
+  mutate(perc = round((n / sum(n)) * 100), digits=0) %>%
+  ungroup() %>%
+  select(!n) %>%
+  pivot_wider(names_from = treatment, values_from = perc) %>%
+  select(!digits)->df_traj
+```
+  
+```{r irr, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE, message=FALSE}
+library(irr)
+
+read_csv("motivation-annotated.csv", 
+         col_types = cols_only(motivation_Carina = col_character(),
+                               motivation_Alex = col_character()))%>%
+  filter(!is.na(motivation_Alex))-> df_motivation
+irr_result <- kappa2(df_motivation)
+```
+  
+As part of the experimental procedure, we elicited individual motivations behind exploring multiple options. 
+In particular, the two authors independently classified these self-reports as either \curiosity{} or \payoff{} (Cohen's $\kappa=$ `r round(irr_result$value, digits=1)`, p-value=  `r round(irr_result$p.value, digits=3)`). 
+Overall, 36 participants stated to have checked more than one option.   
+
+```{r, prop test, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE}  
+df_temp %>% 
+  filter(player.checkmore==1) %>% 
+  mutate(motivation=ifelse(motivation=="curiosity",1,0)) %>%
+  na.omit() %>%
+  select(treatment, motivation)->df_prop
+
+prop.test(c(sum(df_prop %>% filter(treatment=="C"|treatment=="C*") %>% pull(motivation)), 
+            sum(df_prop %>% filter(treatment=="R"|treatment=="R*") %>% pull(motivation))), 
+          c(length(df_prop %>% filter(treatment=="C"|treatment=="C*") %>% pull(motivation)), 
+            length(df_prop %>% filter(treatment=="R"|treatment=="R*") %>% pull(motivation))), 
+)->p1
+
+prop.test(c(sum(df_prop %>% filter(treatment=="C") %>% pull(motivation)), 
+            sum(df_prop %>% filter(treatment=="C*") %>% pull(motivation))), 
+          c(length(df_prop %>% filter(treatment=="C") %>% pull(motivation)), 
+            length(df_prop %>% filter(treatment=="C*") %>% pull(motivation))), 
+          alternative = "greater"
+)->p2
+
+prop.test(c(sum(df_prop %>% filter(treatment=="R") %>% pull(motivation)), 
+            sum(df_prop %>% filter(treatment=="R*") %>% pull(motivation))), 
+          c(length(df_prop %>% filter(treatment=="R") %>% pull(motivation)), 
+            length(df_prop %>% filter(treatment=="R*") %>% pull(motivation))), 
+          alternative = "greater"
+)->p3
+```
+
+There was a significantly higher proportion of participants motivated by curiosity in conditions C/CP than in R/RP (${\chi}^2=$ `r round(p1$statistic, digits=1)`, p = `r round(p1$p.value, digits=3)`), which explains the observed difference in the effect time pressure has on reported die rolls.
+However, for a given die type, there is no significant effect of time pressure on the distribution of motivations (Color: ${\chi}^2=$ `r round(p2$statistic, digits=1)`, p = `r round(p2$p.value, digits=3)`; Regular: ${\chi}^2=$ `r round(p3$statistic, digits=1)`, p = `r round(p3$p.value, digits=3)`). 
+:::
+
+::: column
+```{r countypes, cache=TRUE, echo=FALSE,message=FALSE, warning=FALSE}
+read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+  filter(participant.code %in% df$participant.code) %>%
+  group_by(treatment, type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  rename("motivation" = type) %>%
+  pivot_wider(names_from = treatment, values_from = n)->df_type
+
+df_type  %>%
+  mutate_all(funs(ifelse(is.na(.), 0, .))) %>%
+  mutate(total = rowSums(pick(where(is.numeric), -motivation)))->df_type
+```
+```{r table 1, cache=TRUE, echo=FALSE,message=FALSE, warning=FALSE}
+#| label: tbl-1
+#| tbl-cap: "Self-reported motivations"
+df_self$group <- "Self-report"
+df_type$group <- "Trajectory Type"
+
+rbind(df_self,df_type) %>%
+  group_by(group) %>%
+  gt(rowname_col = "motivation", groupname_col = "group") 
+#  gtsave("table.tex")
+```
+:::
+:::
+
+# Mouse cursor trajectories reveal distinct behavioral types
+
+::: columns
+::: column
+```{r, Fig. 2B, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE, message=FALSE}
+df %>%
+  left_join(read_csv("motivation-annotated.csv", col_types = cols()), 
+            by = "participant.code") %>%
+  ungroup() %>%
+  filter(!is.na(motivation)) %>%
+  mutate(motivation = factor(motivation, levels = c("curiosity","payoff", "other"))) %>%
+  select(motivation, player.report_value) ->df_plt
+
+test_2B<-wilcox.test(player.report_value ~ (motivation == "payoff"), data = df_plt, alternative="less")
+
+test_2B <- wilcox.test(df_plt$player.report_value[df_plt$motivation == 'payoff'], mu = 3.5, alternative = "greater")
+
+p_2B = map_pvalue(test_2B$p.value)
+
+
+df_plt %>%
+  ggplot(aes(x = motivation, y = player.report_value))+
+  stat_histinterval(breaks = 7,slab_linewidth = 1,interval_alpha = .6, point_alpha=.6, point_size=2) +
+  geom_hline(yintercept = 3.5, linetype="dotted", color="darkgrey", size=.2)+
+  theme_classic() +
+  theme(aspect.ratio = 1)+
+  xlab("Motivation") +
+  ylab("Reported Value") +
+  annotate("text", x = 2, y = 6.7, label = paste("W=", round(test_2B$statistic, digits=1)), color = "black", size = 3,  hjust = 0) +
+  annotate("text", x = 2, y = 6.3, label = p_2B, color = "black", size = 3,  hjust = 0)+
+  scale_y_continuous(breaks = seq(min(df$player.report_value), max(df$player.report_value), by = 1))->plt_2B
+plt_2B
+#ggsave(plt_2B, filename = "plt6.pdf", width = 6, height = 6, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+:::
+:::
+
+::: columns
+::: column
+```{r, report-type Fig. 2C, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE}
+df %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+              select(participant.code,type),
+            by = "participant.code") %>%
+  select(participant.code, treatment, player.report_value,type) %>%
+  group_by(type) %>%
+  mutate(mean = mean(player.report_value)) %>%
+  group_by(type, treatment) %>%
+  mutate(mean_col=mean(player.report_value)) %>%
+  ungroup() ->df_temp_C
+
+df %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+              select(participant.code,type),
+            by = "participant.code") %>%
+  select(type, player.report_value) %>%
+  filter(type=="A<O") %>%
+  count(player.report_value) %>%
+  pull(n)->observed_outcomes
+chisq.test(observed_outcomes, p = rep(1/6, 6))->t_chi
+p_temp = map_pvalue(t_chi$p.value)
+
+test_2C<-wilcox.test(player.report_value ~ (type == "A<O"), data = df_temp_C, alternative="less")
+p_temp = map_pvalue(test_2C$p.value)
+
+new_labels <- c("A<O" = expression(paste("A<",Omega)),
+                "A" = "A",
+                "A>O" = expression(paste("A>",Omega)),
+                "A=O" = expression(paste("A=",Omega)))
+
+df_temp_C %>%
+  ggplot(aes(x = type, y = player.report_value)) +
+  stat_histinterval(breaks = 7, slab_linewidth = 1, interval_alpha = .6, point_alpha = .6, point_size = 2) +
+  geom_hline(yintercept = 3.5, linetype = "dotted", color = "darkgrey", size = .2) +
+  theme_classic() +
+  theme(aspect.ratio = 1) +
+  xlab("Type") +
+  ylab("Reported Value") +
+  
+  annotate("text", x = 1.6, y = 6.7, label = paste("W=",round(test_2C$statistic, digits=1)),color = "black", size = 3, hjust = 0) +
+  annotate("text", x = 1.6, y = 6.3, label = p_temp, color = "black", size = 3, hjust = 0) +
+  
+  scale_y_continuous(breaks = seq(min(df$player.report_value), max(df$player.report_value), by = 1)) +
+  scale_x_discrete(labels = new_labels) -> plt_2C 
+plt_2C
+#ggsave(plt_2C, filename = "plt6.pdf", width = 6.7847222/4, height = 3, dpi = 1200, units = "in", device='pdf')
+```
+```{r, arrange fig2, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE}  
+ggarrange(plt_2A,
+          ggarrange(plt_2B,plt_2C, ncol = 1,labels = c("B", "C")), 
+          labels = "A"    
+          )->plt_2
+
+ggsave(plt_2, filename = "plt_2.pdf", width = 8, height = 4, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+During the decision stage in the experiment we tracked the individual mouse cursor trajectories. This allows us to classify the participants into four distinct behavioral types based on the initially explored option ($A$) and ultimately reported roll ($\Omega$).
+$A<\Omega$ explores multiple options and reports a higher roll than the initial one. Their average reported roll is significantly higher than that of the other types ($W=$ `r round(test_2C$statistic, digits=1)`, $p=$ `r round(test_2C$p.value, digits=3)`, Fig 2C) and we interpret such behavior as dishonest.
+:::
+:::
+
+
+::: columns
+::: column
+```{r, Table 2, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE}  
+#| label: tbl-2
+#| tbl-cap: "Motivation by behavioral type"
+df_temp %>%
+  count(type, motivation) %>%
+  mutate(motivation = factor(motivation, levels = c("payoff", "curiosity", "other"))) %>%
+  pivot_wider(names_from = type, values_from = n, values_fill=0) ->tbl2
+
+tbl2 %>%  
+  gt(rowname_col = "motivation") # %>% gtsave("table.tex")
+
+fisher<-fisher.test(tbl2[,2:5])
+```
+:::
+::: column
+If we contrast the behavioral types with the aforementioned self-reported motivations (@tbl-2), we can see that types $A\leq\Omega$ are represented mostly by participants motivated by curiosity whereas type $A$ is dominated by those motivated by payoff (Fisher's exact test, simulated p= `r round(fisher$p.value, digits=3)`).
+:::
+:::
+
+
+::: columns
+::: column
+One can also compare our behavioral types to the classification in \cite{Fischbacher08} who use the categories of honest, income maximizers and partial liars to describe their participants. Following their identification strategy, our types $A$ and $A=\Omega$ would correspond to honest, $A<\Omega$ participants with reports lower than 6 would correspond to partial liars and $A<\Omega$ participants reporting 6 would correspond to `income maximizers'.Our estimates suggest that the share of honest participants is considerably higher than reported before (@tbl:3).
+:::
+::: column
+```{r Table 3, cache=TRUE, echo=FALSE}
+#| label: tbl-3
+#| tbl-cap: "Percentages of reporting types identified by rules of probability or based on mouse trajectories."
+
+## definition by fischbacher
+#(1) Honest subjects: The fraction of people reporting a payoff of 1,2,3 is positive.
+#(2) Income maximizing subjects: The fraction of people reporting a 6 is above 1/6.
+#(3) Partial liars: The fraction of people reporting a 4,5 is above 1/6.
+
+df %>%
+  left_join(
+    read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+      select(participant.code, type),
+    by = "participant.code"
+  ) %>%
+  select(participant.code, treatment, player.report_value, type) %>%
+  #filter(treatment == "C*" | treatment == "C") %>%
+  group_by(treatment) %>%
+  mutate(n=length(participant.code)) %>%
+
+  summarise(
+    honest = sum(player.report_value %in% c(1, 2, 3))/unique(n)*100,
+    partial_liar = sum(player.report_value %in% c(4, 5))/unique(n)*100,
+    income_max = (sum(player.report_value == 6)/unique(n)+1/6)*6/7*100
+  )  -> fisch
+fisch$treatment<-"Fischbacher"
+
+### our definition
+# honest A, A=O
+# income max A<O reporting 6
+# partial liar  A<O reporting <6
+
+df %>%
+  left_join(
+    read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+      select(participant.code, type),
+    by = "participant.code"
+  ) %>%
+  select(participant.code, treatment, player.report_value, type) %>%
+ # filter(treatment %in% c("C*", "C")) %>%
+  group_by(treatment) %>%
+  mutate(n=length(participant.code)) %>%
+  group_by(treatment) %>%
+  summarise(
+    honest = sum(type == "A" | type == "A=O") / unique(n)*100,
+    partial_liar = sum(type == "A<O" & player.report_value %in% c(2, 3, 4, 5)) / unique(n)*100,
+    income_max = sum(type == "A<O" & player.report_value == 6) / unique(n)*100
+  )->hausladen
+
+
+rbind(fisch, hausladen) %>%
+  gt(rowname_col = "treatment") %>%
+  fmt_number(columns = c("honest","income_max","partial_liar"), decimals=0) 
+  #gtsave("test.tex")
+
+```
+:::
+:::
+
+# First value visited
+```{r}
+read_csv('/Users/carinah/Documents/GitHub/color-me-honest/analysis/totaldist-annotated-value.csv') %>%
+  na.omit() -> df_temp
+
+observed_frequencies<-table(df_temp$value_first)
+expected_frequencies <- rep(length(df_temp$value_first) / 6, 6)
+chisq.test(observed_frequencies, p = rep(1/6, 6))
+
+```
+
+
+# Trajectories provide insights into the dynamics of the decision process
+## Initiation Time
+
+::: columns
+::: column
+```{r time stats, echo=FALSE, cache=TRUE}
+# movement time is not normally distributed
+df %>%
+  mutate(time = sapply(strsplit(as.character(player.mouse_t), ","), function(x) max(as.numeric(x)))) %>%
+  inner_join(total_dist, by = c("participant.code" = "participant.code")) %>%
+  select(participant.code,treatment,time) %>%
+  group_by(treatment) %>%
+  summarise(
+    mean_tt = mean(time),
+    shapiro_tt = shapiro.test(time)$p.value,
+    .groups = "drop"
+  ) %>% gt() %>% fmt_number(columns = mean_tt:shapiro_tt) -> test_normality
+  
+# initiation time
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed==TRUE) %>%
+  group_by(participant.code, treatment) %>%
+  summarise(t=min(t),
+            .groups = "drop")  %>%
+  ungroup() ->df_temp
+
+df_temp %>%
+  do(pairwise_tests = tidy(pairwise.wilcox.test(.$t, .$treatment, p.adj = "none"))) %>%
+  unnest(pairwise_tests) %>%
+  mutate(signif = map_pvalue(p.value))->init_t
+
+test_C<-wilcox.test(t ~ (treatment == "C"), data = df_temp%>% filter(treatment=="C"|treatment=="C*"), alternative="less")
+test_R<-wilcox.test(t ~ (treatment == "R*"), data = df_temp%>% filter(treatment=="R"|treatment=="R*"), alternative="two.sided")
+test_p<-wilcox.test(t ~ (treatment == "R*"), data = df_temp%>% filter(treatment=="R*"|treatment=="C*"), alternative="two.sided")
+```
+```{r Fig 3A, cache=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed==TRUE) %>%
+  group_by(participant.code, treatment) %>%
+  summarise(t=min(t), .groups = "drop") %>%
+  
+  ggplot(aes(x = treatment, y = t, color=treatment)) +
+  stat_dotsinterval(quantiles = 100, fatten_point=1.5, interval_alpha=.9)+
+  theme_classic()+
+  ylim(0,1)+
+  ylab("Initiation Time")+xlab("Treatment")+
+  theme(aspect.ratio = 1,
+        text=element_text(size=9),
+        legend.position = "none")+
+  
+  ggpubr::geom_bracket(aes(xmin = as.character(init_t[1,1]),xmax = as.character(init_t[1,2]), y.position = .95,label = as.character(init_t[1,4])), data = init_t,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  ggpubr::geom_bracket(aes(xmin = as.character(init_t[3,1]),xmax = as.character(init_t[3,2]), y.position = .85,label = as.character(init_t[3,4])), data = init_t,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  ggpubr::geom_bracket(aes(xmin = as.character(init_t[5,1]),xmax = as.character(init_t[5,2]), y.position = .75,label = as.character(init_t[5,4])), data = init_t,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  ggpubr::geom_bracket(aes(xmin = as.character(init_t[4,1]),xmax = as.character(init_t[4,2]), y.position = .65,label = as.character(init_t[4,4])), data = init_t,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) ->plt_3A
+plt_3A
+#ggsave(p4, filename = "plt5.pdf", width = 6.6/4, height= 6/4, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+Concerning initiation time, we find significant differences between the treatments. 
+The average initiation time in C is higher than in CP ($W =$ `r round(test_C$statistic, digits=1)`, $p=$ `r round(test_C$p.value, digits=3)`). 
+However, there is no difference between R and RP  ($W =$ `r round(test_R$statistic, digits=1)`, $p=$ `r round(test_R$p.value, digits=3)`). 
+On the other hand, the average initiation time in R* is higher than in C*  ($W =$ `r round(test_p$statistic, digits=1)`, $p=$ `r round(test_p$p.value, digits=3)`). 
+This implies that reporting the die roll was easiest in C* and most difficult in C (Fig 3A). 
+:::
+:::
+
+::: columns
+::: column
+```{r Fig 3B, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed == TRUE) %>%
+  group_by(participant.code, treatment, report) %>%
+  summarise(t=min(t),
+            .groups = "drop")->df_temp
+
+
+test_rv<-wilcox.test(t ~ (report == 4), data = df_temp, alternative="less")
+p_2B = map_pvalue(test_rv$p.value)
+
+
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed == TRUE) %>%
+  group_by(participant.code, treatment, report) %>%
+  summarise(t=min(t),
+            .groups = "drop")  %>%
+  mutate(mean_global=mean(t)) %>%
+  group_by(report) %>%
+  mutate(mean=mean(t)) %>%
+  
+  group_by(treatment,report) %>%
+  mutate(mean_treat=mean(t)) %>%
+  
+  
+  ggplot(aes(y=t, x=factor(report))) +
+  geom_point(pch=".", alpha=.8) +
+  geom_point(aes(y=mean, x=factor(report)), size=2, color="black") +
+  geom_point(aes(y=mean_treat, x=factor(report), color=treatment), size=1.5, shape=18) +
+  theme_classic() +
+  ylim(0,.82) + 
+  xlab("Reported Value") +ylab("Initiation Time")+
+  geom_vline(xintercept = 3.5, linetype="dotted", color="grey")+
+  annotate("text",x=4,y=.815,label=p_2B, size=3)+
+  theme(aspect.ratio = 1, 
+        text=element_text(size=9),
+        legend.position = "none",
+        legend.box = "horizontal",
+        legend.direction = "horizontal") +
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) ->plt_3B
+plt_3B
+#ggsave(plt_3B, filename = "plt5.pdf", width = 6.6/4, height= 6.6/4, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+We also note a number of interesting findings across all four treatments. Reporting a roll of 4 is associated with the highest initiation time relative to all other reports combined (W=`r round(test_rv$statistic, digits=1)`, p-value= `r round(test_rv$p.value, digits=3)`).
+This can be explained by individuals engaging in partial lying under the hypothesis that telling the truth and lying fully both require less effort.
+:::
+:::
+
+
+::: columns
+::: column
+```{r Fig 3C, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed==TRUE) %>%
+  group_by(participant.code, treatment) %>%
+  summarise(t=min(t),
+            .groups = "drop")  %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE), 
+            by="participant.code") ->df_temp
+
+test_3Cless<-wilcox.test(t ~ (type == "A<O"), data = df_temp, alternative="less")
+
+test_3C<-wilcox.test(t ~ (type == "A=O"), data = df_temp, alternative="less")
+p_3C = map_pvalue(wilcox.test(t ~ (type == "A=O"), data = df_temp, alternative="less")$p.value)
+
+new_labels <- c("A<O" = expression(paste("A<",Omega)),
+                "A" = "A",
+                "A>O" = expression(paste("A>",Omega)),
+                "A=O" = expression(paste("A=",Omega)))
+
+
+df_temp %>%
+  group_by(type) %>%
+  mutate(mean=mean(t)) %>%
+  
+  ggplot(aes(y=t, x=reorder(type,mean))) +
+  geom_point(pch=".", alpha=.8) +
+  geom_point(aes(y=mean, x=factor(type)), size=2, color="black") +
+  theme_classic() +
+  ylim(0,.8) + 
+  xlab("Type") +ylab("Initiation Time")+
+  annotate("text",x=3.8,y=.7,label=p_3C, size=3)+
+  theme(aspect.ratio = 1, 
+        text=element_text(size=9),
+        legend.position = "bottom") +
+  scale_x_discrete(labels = new_labels)->plt_3C
+plt_3C
+#ggsave(p3C, filename = "plt5.pdf", width = 6.6/4, height= 6.6/4, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+The $A=\Omega$ type exhibits the highest initiation time relative to all other types combined (W=`r round(test_3C$statistic, digits=1)`, p-value= `r round(test_3C$p.value, digits=3)`). 
+On the other hand, the $A<\Omega$ type is not statistically different from the rest (W=`r round(test_3Cless$statistic, digits=1)`, p-value= `r round(test_3Cless$p.value, digits=3)`). 
+The pattern implies that it takes more effort to be honest, and it may as well have turned out to be the other way around.
+:::
+:::
+
+::: columns
+::: column
+```{r Fig 3D, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+df_lng %>%
+  group_by(participant.code) %>%
+  mutate(changed = c(FALSE, (diff(x) != 0 | diff(y) != 0))) %>%
+  filter(changed==TRUE) %>%
+  group_by(participant.code, treatment) %>%
+  summarise(t=min(t),
+            .groups = "drop")  %>%
+  left_join(read_csv("motivation-annotated.csv", col_types = cols()), 
+            by = "participant.code") %>%
+  select(participant.code, treatment,motivation,t) %>%
+  na.omit() %>%
+  group_by(motivation) %>%
+  mutate(mean=mean(t)) ->df_temp
+
+test_3D<-wilcox.test(t ~ (motivation == "curiosity"), data = df_temp, alternative="less")
+p_3D = map_pvalue(test_3D$p.value)
+
+  
+ggplot(df_temp, aes(y=t, x=reorder(motivation,mean))) +
+  geom_point(pch=".", alpha=.8) +
+  geom_point(aes(y=mean, x=factor(motivation)), size=2, color="black") +
+  theme_classic() +
+  ylim(0,.8) + 
+  ylab("")+ 
+  xlab("Annotation") +ylab("Initiation Time")+
+  annotate("text",x=2,y=.8,label=p_3D, size=3)+
+  theme(aspect.ratio = 1, 
+        axis.text.x = element_text(vjust = 1.1, hjust=1, size=6),
+        legend.position = "bottom") ->plt_3D
+plt_3D
+#ggsave(plt_3D, filename = "plt5.pdf", width = 6.6,height = 3, dpi = 1200, units = "in", device='pdf')
+```
+:::
+::: column
+Between the two motivations to explore reported by the participants, curiosity is associated with a higher initiation time than payoff (W=`r round(test_3D$statistic, digits=1)`, p-value= `r round(test_3D$p.value, digits=3)`), which is to be expected.
+:::
+:::
+
+
+## AUC
+::: columns
+::: column
+```{r Fig 3E AUC, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+library(pracma)
+source("remapping.R")
+
+df_lng_rot %>% # only A types
+  left_join(df%>% select(participant.code, player.report_value), by="participant.code") %>%
+  mutate(y_new=abs(y_new)) %>% #otherwise there is negative AUC which makes no sense
+  
+  group_by(treatment,participant.code) %>%
+  summarise(auc = trapz(x_new, y_new)) %>%
+  
+  ungroup() %>%
+  mutate(auc = (auc - min(auc)) / (max(auc) - min(auc))) %>%
+  
+  group_by(treatment) %>%
+  mutate(mean_auc=mean(auc)) ->df_temp
+
+
+df_temp %>%
+  select(participant.code, treatment, auc) %>%
+  unique() %>% 
+  ungroup() %>%
+  do(pairwise_tests = tidy(pairwise.wilcox.test(.$auc, .$treatment, p.adj = "none"))) %>%
+  unnest(pairwise_tests)%>% 
+  mutate(signif = map_pvalue(p.value)) %>%
+  filter(!signif=="ns")-> test_3E
+
+test1 <- wilcox.test(auc ~ treatment, alternative = "less",
+                     data = df_temp %>% filter(treatment %in% c("R", "R*")))
+
+ggplot(df_temp, aes(x = treatment, y = auc, color=treatment)) +
+  stat_dotsinterval(quantiles = 100, fatten_point=1.5, interval_alpha=.9)+
+  theme_classic()+
+  theme(aspect.ratio = 1, 
+        legend.position = "none",
+        text = element_text(size=9)) +
+  ylim(0,.75)+xlab("Treatment")+ylab("AUC")+
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0"))+
+  ggpubr::geom_bracket(aes(xmin = as.character(test_3E[1,1]),
+                           xmax = as.character(test_3E[1,2]), 
+                           y.position = .7,
+                           label = as.character(test_3E[1,4])), 
+                       data = test_3E,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+    
+  ggpubr::geom_bracket(aes(xmin = as.character(test_3E[2,1]),
+                           xmax = as.character(test_3E[2,2]), 
+                           y.position = .6,
+                           label = as.character(test_3E[2,4])), 
+                       data = test_3E,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  ggpubr::geom_bracket(aes(xmin = as.character(test_3E[3,1]),
+                           xmax = as.character(test_3E[3,2]), 
+                           y.position = .5,
+                           label = as.character(test_3E[3,4])), 
+                       data = test_3E,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) ->plt_3E
+plt_3E
+```
+:::
+::: column
+The average area under the curve (AUC) is significantly larger in R* than in R (W=`r round(test1$statistic, digits=1)`, p-value= `r round(test1$p.value, digits=3)`), which indicates a greater level of response conflict in the decision-making process.
+:::
+
+:::
+
+## Velocity
+::: columns
+::: column
+```{r Fig 3F velocity, echo=FALSE, cache=TRUE, warning=FALSE, message=FALSE}
+df_lng %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+              select(!treatment),
+            by="participant.code") %>%
+  filter(type=="A") %>%
+  filter(!participant.code=="zx7qzgja") %>%
+  
+  arrange(participant.code, t) %>%
+  group_by(participant.code, treatment, report) %>%
+  mutate(x2 = lead(x),
+         y2 = lead(y),
+         t2 = lead(t)) %>%
+  ungroup() %>%
+  filter(!is.na(x2)) %>%
+  
+  mutate(distance = sqrt((x2 - x)^2 + (y2 - y)^2),
+         time_interval = t2 - t,
+         velocity = distance / time_interval) %>%
+  
+  select(participant.code, treatment, report, t, velocity)-> df_vel
+ 
+# df_vel %>% write_csv("/Users/carinaines/df_vel.csv")
+  
+  
+  df_vel %>%
+    group_by(treatment,report, participant.code) %>%
+    summarise(velocity=max(velocity), .groups="drop") %>%
+    ungroup() %>%
+    mutate(velocity = (velocity - min(velocity)) / (max(velocity) - min(velocity))) ->df_temp
+  
+  
+df_temp %>%
+  select(participant.code, treatment, velocity) %>%
+  unique() %>% 
+  ungroup() %>%
+  do(pairwise_tests = {
+    tests <- pairwise.wilcox.test(.$velocity, .$treatment, p.adj = "none")
+    tests_results <- tidy(tests)
+    tests_results <- tests_results %>% add_column(TestStatistic = tests$statistic)
+    tests_results
+  }) %>%
+  unnest(pairwise_tests) %>%
+  mutate(signif = map_pvalue(p.value)) %>%
+  filter(!signif=="ns")-> test_3F
+  
+test1 <- wilcox.test(velocity ~ treatment, alternative = "less",
+                     data = df_temp %>% filter(treatment %in% c("R", "R*")))
+
+  ggplot(df_temp, aes(x = treatment, y = velocity, color=treatment)) +
+    stat_dotsinterval(quantiles = 100, fatten_point=1.5, interval_alpha=.9)+
+    theme_classic()+
+    theme(aspect.ratio = 1,
+          legend.position = "none",
+          text = element_text(size=9)) +
+    xlab("Treatment")+ ylab("Max Velocity") + ylim(0,.75)+
+    scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) +
+
+ggpubr::geom_bracket(aes(xmin = as.character(test_3F[1,1]),
+                         xmax = as.character(test_3F[1,2]), 
+                         y.position = .6,
+                         label = as.character(test_3F[1,4])), 
+                     data = test_3F,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3F[2,1]),
+                         xmax = as.character(test_3F[2,2]), 
+                         y.position = .5,
+                         label = as.character(test_3F[2,4])), 
+                     data = test_3F,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+ggpubr::geom_bracket(aes(xmin = as.character(test_3F[3,1]),
+                         xmax = as.character(test_3F[3,2]), 
+                         y.position = .7,
+                         label = as.character(test_3F[3,4])), 
+                     data = test_3F,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) ->plt_3F
+plt_3F
+```
+:::
+::: column
+Furthermore, the $R*$ group displayed greater peak (maximum) velocity than the $R$ group, indicating a greater level of commitment, vigor, and impulsiveness for action \cite{yamauchi2019assessing} (W=`r round(test1$statistic, digits=1)`, p-value= `r round(test1$p.value, digits=3)`).
+:::
+:::
+
+## Idle and Movement Time
+
+::: columns
+::: column
+```{r Fig 3G idle , cache=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+df_lng %>%
+    left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+              select(!treatment),
+            by="participant.code") %>%
+  filter(type=="A") %>%
+  
+  group_by(treatment, participant.code) %>%
+  summarise(
+    changed = c(FALSE, (diff(x) != 0 | diff(y) != 0)),
+    first_change = min(t[changed]),
+    total_time = max(t),
+    idle_time_with = total_time - sum(diff(t[changed])),
+    idle_time = total_time - (first_change - t[1]) - sum(diff(t[changed & t >= first_change]))
+  ) %>%
+  ungroup() %>%
+  select(participant.code, treatment, idle_time) %>%
+  distinct() %>%
+  do(pairwise_tests = tidy(pairwise.wilcox.test(.$idle_time, .$treatment, p.adj = "none"))) %>%
+  unnest(pairwise_tests) %>%
+  mutate(signif = map_pvalue(p.value)) %>%
+  filter(!signif=="ns")-> test_3G
+
+  
+df_lng %>%
+    left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+             select(!treatment),
+             by="participant.code") %>%
+  filter(type=="A") %>%
+  group_by(participant.code) %>%
+  mutate(
+    changed = c(FALSE, (diff(x) != 0 | diff(y) != 0)),
+    first_change = min(t[changed]),
+    total_time = max(t),
+    idle_time_with = total_time - sum(diff(t[changed])),
+    idle_time = total_time - (first_change - t[1]) - sum(diff(t[changed & t >= first_change]))
+  ) %>%
+  ungroup() %>%
+  select(participant.code, treatment, idle_time) %>%
+  unique() %>%
+  
+  ggplot(aes(x = treatment, y = idle_time, color=treatment)) +
+  stat_dotsinterval(quantiles = 100, fatten_point=1.5, interval_alpha=.9)+
+  theme_classic()+
+  ylim(0,1)+
+  ylab("Idle Time")+xlab("Treatment")+
+  theme(aspect.ratio = 1, 
+        legend.position = "none",
+        text=element_text(size=9))+
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3G[1,1]),
+                         xmax = as.character(test_3G[1,2]), 
+                         y.position = .6,
+                         label = as.character(test_3G[1,4])), 
+                     data = test_3G,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3G[2,1]),
+                         xmax = as.character(test_3G[2,2]), 
+                         y.position = .5,
+                         label = as.character(test_3G[2,4])), 
+                     data = test_3G,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+ggpubr::geom_bracket(aes(xmin = as.character(test_3G[3,1]),
+                         xmax = as.character(test_3G[3,2]), 
+                         y.position = .7,
+                         label = as.character(test_3G[3,4])), 
+                     data = test_3G,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) ->plt_3G
+plt_3G
+```
+```{r Fig 3H movement, cache=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+df %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+             select(!treatment),
+             by="participant.code") %>%
+  filter(type=="A") %>%
+  mutate(time = sapply(strsplit(as.character(player.mouse_t), ","), function(x) max(as.numeric(x)))) %>%
+  select(treatment, time) ->df_temp
+df_temp %>%  do(pairwise_tests = tidy(pairwise.wilcox.test(.$time, .$treatment, p.adj = "none"))) %>%
+  unnest(pairwise_tests)%>% 
+  mutate(signif = map_pvalue(p.value)) %>%
+  filter(!signif=="ns")-> test_3H
+
+test1 <- wilcox.test(time ~ treatment, alternative = "greater",
+                     data = df_temp %>% filter(treatment %in% c("R", "R*")))
+
+
+df %>%
+  left_join(read_csv("totaldist-annotated.csv", show_col_types = FALSE) %>%
+             select(!treatment),
+             by="participant.code") %>%
+  ungroup() %>%
+  filter(type=="A") %>% #why did I filter by those?
+  group_by(participant.code) %>%
+  mutate(time = sapply(strsplit(as.character(player.mouse_t), ","), function(x) max(as.numeric(x))))   %>%
+
+  ggplot(aes(x = treatment, y = time, color=treatment)) +
+  stat_dotsinterval(quantiles = 100, fatten_point=1.5, interval_alpha=.9)+
+  theme_classic()+
+  ylim(1,6)+
+  ylab("Movement Time")+xlab("Treatment")+
+  theme(aspect.ratio = 1, 
+        legend.position = "none",
+        text=element_text(size=9))+
+  scale_color_manual(values = c("#dc267f","#ffb000", "#648fff", "#785ef0")) +
+
+ggpubr::geom_bracket(aes(xmin = as.character(test_3H[1,1]),
+                         xmax = as.character(test_3H[1,2]), 
+                         y.position = 5,
+                         label = as.character(test_3H[1,4])), 
+                     data = test_3H,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3H[2,1]),
+                         xmax = as.character(test_3H[2,2]), 
+                         y.position = 4.5,
+                         label = as.character(test_3H[2,4])), 
+                     data = test_3H,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+ggpubr::geom_bracket(aes(xmin = as.character(test_3H[3,1]),
+                         xmax = as.character(test_3H[3,2]), 
+                         y.position = 5.5,
+                         label = as.character(test_3H[3,4])), 
+                     data = test_3H,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3H[4,1]),
+                         xmax = as.character(test_3H[4,2]), 
+                         y.position = 4,
+                         label = as.character(test_3H[4,4])), 
+                     data = test_3H,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) +
+  
+ggpubr::geom_bracket(aes(xmin = as.character(test_3H[5,1]),
+                         xmax = as.character(test_3H[5,2]), 
+                         y.position = 5,
+                         label = as.character(test_3H[5,4])), 
+                     data = test_3H,size=.1,inherit.aes = FALSE, tip.length =c(.01,.01),label.size = 2.5) ->plt_3H
+plt_3H
+```
+:::
+::: column
+Note that for the subsequent analysis I only use types A. 
+At the same time, the former exhibit a significantly lower overall mouse movement time than the latter  (W=`r round(test1$statistic, digits=1)`, p-value= `r round(test1$p.value, digits=3)`) without any difference in idle time.
+:::
+:::
+
+```{r, Fig 3, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE}  
+ggarrange(
+  plt_3A, plt_3B,plt_3C,plt_3D,
+  plt_3E, plt_3F,plt_3G,plt_3H,
+  labels = c("A", "B", "C", "D", "E", "F", "G", "H"),
+  ncol = 2,
+  nrow=4) ->plt_3
+
+ggsave(plt_3, filename = "plt_3.pdf", width = 6.7847222, height = 3.5, dpi = 1200, units = "in", device='pdf')
+ggsave(plt_3, filename = "plt_3_1.pdf", width = 6, height = 12, dpi = 1200, units = "in", device='pdf')
+```
+
+
+\setcounter{table}{0}
+\renewcommand{\thetable}{A.\arabic{table}}
+
+# Appendix 
+
+```{r A.1, cache=TRUE, message=FALSE, warning=FALSE, echo=FALSE}
+#| label: tbl-A1
+#| tbl-cap: "Data Sample Overview"
+data <- tibble(
+  'Jena' = c(
+    dim(raw_nov)[1],
+    length(unique(raw_nov$session.code)),
+    table(raw_nov$player.cblind)[2],
+    table(raw_nov$player.report)[7],
+    round(table(raw_nov$player.sex)[1] / sum(table(raw_nov$player.sex))*100, digits=0),
+    round(mean(raw_nov$player.age), digits=1)
+  ),
+  'Bonn' = c(
+    dim(raw_jun)[1],
+    length(unique(raw_jun$session.code)),
+    table(raw_jun$player.cblind)[2],
+    table(raw_jun$player.report)[7],
+    round(table(raw_jun$player.sex)[1] / sum(table(raw_jun$player.sex))*100, digits=0),
+    round(mean(raw_jun$player.age), digits=1)
+  )
+) %>% 
+  mutate(`overall` = case_when(
+    row_number() %in% c(5, 6) ~ (`Jena` + `Bonn`) / 2, 
+    TRUE ~ `Jena` + `Bonn`
+  ))
+  
+data$name<-c('observations', 'sessions', 'cblind', 'failed', '% females', 'mean age')
+data %>%  gt(rowname_col = "name") 
+```
+
+```{r A.2, cache=TRUE, echo=FALSE}
+#| label: tbl-A2
+#| tbl-cap: "Time Pressure Manipulation Check"
+
+test1 <- wilcox.test(player.recall_pressure ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("R", "R*")))
+test2 <- wilcox.test(player.recall_pressure ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("C", "C*")))
+test3 <- wilcox.test(player.recall_pressure ~ treatment, alternative = "two.sided",
+                     data = df %>% filter(treatment %in% c("R*", "C*")))
+
+test4 <- wilcox.test(player.recall_tpressure ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("R", "R*")))
+test5 <- wilcox.test(player.recall_tpressure ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("C", "C*")))
+test6 <- wilcox.test(player.recall_tpressure ~ treatment, alternative = "two.sided",
+                     data = df %>% filter(treatment %in% c("R*", "C*")))
+
+test7 <- wilcox.test(player.recall_speed ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("R", "R*")))
+test8 <- wilcox.test(player.recall_speed ~ treatment, alternative = "less",
+                     data = df %>% filter(treatment %in% c("C", "C*")))
+test9 <- wilcox.test(player.recall_speed ~ treatment, alternative = "two.sided",
+                     data = df %>% filter(treatment %in% c("R*", "C*")))
+
+group1 <- c("R", "C", "R*")
+group2 <- c("R*", "C*", "C*")
+test <- c("less", "less", "two.sided")
+W <- c(test1$statistic, test2$statistic, test3$statistic)
+p.value <- c(test1$p.value, test2$p.value, test3$p.value)
+
+W2 <- c(test4$statistic, test5$statistic, test6$statistic)
+p.value2 <- c(test4$p.value, test5$p.value, test6$p.value)
+
+W3 <- c(test7$statistic, test8$statistic, test9$statistic)
+p.value3 <- c(test7$p.value, test8$p.value, test9$p.value)
+
+tbl <- tibble(
+  group1 = group1,
+  group2 = group2,
+  test = test,
+  W = W,
+  p.value = p.value,
+  
+  W2 = W2,
+  p.value2 = p.value2,
+  
+  W3 = W3,
+  p.value3 = p.value3
+)
+
+tbl %>%
+  gt(rowname_col = "group1") %>%
+  tab_spanner(label = "Pressure", columns = c(W, p.value)) %>%
+  tab_spanner(label = "D-Pressure", columns = c(W2, p.value2)) %>%
+  tab_spanner(label = "Speed", columns = c(W3, p.value3)) %>%
+  tab_header(title = "Test Results") %>%
+  cols_align(align = "center", columns = everything()) %>%
+  cols_label(group1 = "Group 1", group2 = "Group 2", test = "Test", 
+             W = "W", p.value = "P-value")%>%
+  fmt_number(columns = c(p.value, p.value2, p.value3), decimals = 2) %>%
+  fmt_number(columns = c(W, W2, W3), decimals = 0) 
+#  gtsave("test.tex")
+```
+
+
+::: columns
+::: column
+```{r A.3, cache=TRUE, echo=FALSE}
+#| label: tbl-A3
+#| tbl-cap: "Participants’ Favorite Color"
+df_counts <- as.data.frame(table(df$player.favcolor))
+colnames(df_counts)<-c('color', 'count')
+df_counts$color<-c("blue", "green", "brown", "pink", "yellow", "grey", "none")
+df_counts$color <- factor(df_counts$color, levels = df_counts$color)
+df_counts %>% gt()
+
+# report = favcolor?
+t<-table(ifelse(df$player.favcolor[ c(df$treatment=="C" | df$treatment== "C*")]==df$player.report_face[ c(df$treatment=="C" | df$treatment== "C*")],1,0))
+share_favcol<-t[2]/sum(t) 
+
+bt<-binom.test(t[2], sum(t), p = 1/6)
+success<-round(bt$statistic/bt$parameter*100, digits=3)
+```
+:::
+::: column
+We found that mouse movements are unlikely to be driven by other factors than the payoff related to the color. To control for possible other motives for a participant's choice of color, we asked them to report their favorite color. Only `r success` % of the participants reported their favorite color. A binomial test shows that the probability of success (favorite colors reported) is not significantly different from a random choice (p-value = `r round(bt$p.value, digits=3)`).
+:::
+:::
+
+```{r A.4, cache=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+#| label: tbl-A4
+#| tbl-cap: "CRT"
+df_summary <- df %>%
+  mutate(`bat and ball` = ifelse(player.crt1 == 5, 1, 0), 
+         `machine` = ifelse(player.crt2 == 100, 1, 0), 
+         `lily pads` = ifelse(player.crt3 == 47, 1, 0)) %>% 
+  pivot_longer(cols = c(`bat and ball`, machine, `lily pads`), names_to = "CRT", values_to = "Correct") %>%
+  group_by(treatment, CRT) %>%
+  summarize(
+    correct_count = sum(Correct),
+    total_count = n(),
+    .groups = 'drop'
+  )
+
+
+df_summary %>%
+  split(.$CRT) %>%
+  map_dfr(~{
+    test_result <- chisq.test(.$correct_count, .$total_count - .$correct_count)
+    data.frame(
+      CRT = unique(.$CRT),
+      Chi_Square = test_result$statistic,
+      df = test_result$parameter,
+      p_value = test_result$p.value
+    )
+  }) %>% 
+  gt() %>%
+  fmt_number(
+    columns = p_value,
+    decimals = 2
+  ) #%>% gtsave("test.tex", inline_css = TRUE)
+```
+
+
+```{r A.41, cache=TRUE, echo=FALSE, warning=FALSE, message=FALSE}
+
+df %>%
+  mutate(`bat and ball` = ifelse(player.crt1 == 5, 1, 0), 
+         `machine` = ifelse(player.crt2 == 100, 1, 0), 
+         `lily pads` = ifelse(player.crt3 == 47, 1, 0)) %>%
+  group_by(participant.code)%>%
+  mutate(correct=sum(`bat and ball`, `machine`,`lily pads`)) %>%
+  left_join(read_csv("totaldist-annotated.csv", col_types = cols()), 
+            by = "participant.code") %>%
+    select(participant.code, type, correct)-> df_temp
+df_temp%>%  group_by(type) %>%
+  count(correct) %>%
+  pivot_wider(names_from = correct, values_from = n)->tbl
+
+tbl[is.na(tbl)] <- 0
+print(fisher.test(tbl[,2:5], workspace = 2e8))
+print(chisq.test(tbl[,2:5]))
+
+kruskal_result <- kruskal.test(correct ~ type, data = df_temp)
+print(kruskal_result)
+
+```
+
+
+::: columns
+::: column
+```{r A.5, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE, message=FALSE}  
+#| label: tbl-A5
+#| tbl-cap: "Percentage of participants who have checked more than one option"
+df %>%
+  select(participant.code, treatment, player.checkmore) %>%
+  na.omit() %>%
+  left_join(read_csv("totaldist-annotated.csv", col_types = cols()) %>%
+              select(participant.code, options_visited), 
+            by = "participant.code") %>%
+  mutate(options_visited = ifelse(options_visited > 1, 1, 0)) %>%
+  rename("self-reported" = player.checkmore,
+         "trajectories" = options_visited) -> df_temp
+
+
+df_temp %>%
+  pivot_longer(cols = c(`self-reported`, `trajectories`)) %>%
+  group_by(treatment, name) %>%
+  summarise(value = sum(value)) %>%
+  group_by(treatment) %>%
+  mutate(percentage = round(value / sum(value) * 100, 0)) %>%
+  ungroup() %>%
+  select(!value) %>%
+  pivot_wider(names_from = treatment, values_from = percentage) %>%
+  gt(rowname_col = "name") %>%
+  gtsave("table.tex")
+
+
+# by self-reported motivation
+df_temp %>%  
+  group_by(treatment) %>%
+  summarise(
+    total = n(),
+    honest = round(sum(`self-reported` == `trajectories`) / n() * 100),
+    confusion = round(sum(`self-reported` == 1 & `trajectories` == 0) / n() * 100),
+    lie = round(sum(`self-reported` == 0 & `trajectories` == 1) / n() * 100)) %>%
+  ungroup() %>%
+  select(!total) %>%
+  pivot_longer(cols = c(honest, confusion, lie), names_to = "type", values_to = "percentage") %>%
+  pivot_wider(names_from = treatment, values_from = percentage) ->df_unused
+  #gt(rowname_col = "type")
+```
+:::
+
+::: column
+Participants were asked to self-report whether they checked more than one option. Additionally, mouse trajectories were analyzed to determine the exact number of options checked by each participant. A number on the clock dial was considered checked if the mouse cursor crossed it during the task.
+:::
+:::
+
+```{r toannotate, cache=TRUE, echo=FALSE, warning=FALSE, echo=FALSE, message=FALSE}  
+#this generates the dataset that the authors annotated for motivation
+df %>%
+  select(participant.code, player.checkmore, player.checkwhy) %>%
+  na.omit() %>%
+  arrange(player.checkmore) %>%
+  filter(!player.checkwhy=="...nun dürfen Sie zur Tastatur greifen") %>%
+  filter(!player.checkwhy=="") -> to_annotate
+  #write.csv("motivation.csv") 
+```
