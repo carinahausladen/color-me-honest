@@ -15,11 +15,15 @@ Our study introduced several modifications to the traditional die-in-a-cup exper
 If you utilize the code or data from our experiment, please cite our preprint using the following BibTeX entry:
 
 ```bibtex
-@article{hausladen2022color,
-  title={Color Me Honest! Time Pressure and Dis(honest) Behavior},
-  author={Hausladen, Carina I. and Nikolaychuk, Olexandr},
-  year={2023}
+@article{hausladen2024color,
+  title={Color me honest! Time pressure and (dis)honest behavior},
+  author={Hausladen, Carina I and Nikolaychuk, Olexandr},
+  journal={Frontiers in Behavioral Economics},
+  volume={2},
+  year={2024},
+  doi={10.3389/frbhe.2023.1337312}
 }
+
 ```
 
 
